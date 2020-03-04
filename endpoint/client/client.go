@@ -496,7 +496,7 @@ func (p *Client) listenApp() {
 func (p *Client) handleAppConnRequest(appConn *zpnet.IPConn, cID uint16) {
 	log.Printf("Client#handleAppConnRequest : handle client req , cliID is : %v , cID is : %v !", p.cliID, cID)
 	connected := false
-	bs := make([]byte, 4096, 4096)
+	bs := make([]byte, 10240, 10240)
 	for {
 		select {
 		case <-appConn.CloseSignal():
