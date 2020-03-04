@@ -1,16 +1,19 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
+	zpnet "github.com/godaner/zp/net"
 	"github.com/godaner/zp/zpp"
 	"github.com/godaner/zp/zpp/zppnew"
-	zpnet "github.com/godaner/zp/net"
 	"io"
 	"log"
 	"math"
 	"math/rand"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -278,18 +281,17 @@ func (p *Proxy) receiveClientMsg(clientConn *zpnet.IPConn) {
 			case zpp.MSG_TYPE_CLIENT_HELLO:
 				log.Printf("Proxy#receiveClientMsg : receive client hello , cliID is : %v , cID is : %v , sID is : %v !", cliID, cID, sID)
 				// receive client hello , we should listen the client_wanna_proxy_port , and dispatch browser data to this client.
-				clientWannaProxyPort := string(m.AttributeByType(zpp.ATTR_TYPE_PORT))
-				p.clientHelloHandler(clientConn, clientWannaProxyPort, cliID, sID)
-			case zpp.MSG_TYPE_CONN_CREATE_DONE:
-				log.Printf("Proxy#receiveClientMsg : receive client conn create done , cliID is : %v , cID is : %v , sID is : %v !", cliID, cID, sID)
-				p.clientConnCreateDoneHandler(clientConn, cliID, cID, sID)
-			case zpp.MSG_TYPE_CONN_CLOSE:
-				log.Printf("Proxy#receiveClientMsg : receive client conn close , cliID is : %v , cID is : %v , sID is : %v !", cliID, cID, sID)
-				p.clientConnCloseHandler(cliID, cID, sID)
+				p.clientHelloHandler(clientConn, cliID, sID)
 			case zpp.MSG_TYPE_REQ:
 				log.Printf("Proxy#receiveClientMsg : receive client req , cliID is : %v , cID is : %v , sID is : %v !", cliID, cID, sID)
 				// receive client req , we should judge the client port , and dispatch the data to all browser who connect to this port.
 				p.clientReqHandler(clientConn, m)
+			case zpp.MSG_TYPE_CONN_CLOSE:
+				log.Printf("Proxy#receiveClientMsg : receive client conn close , cliID is : %v , cID is : %v , sID is : %v !", cliID, cID, sID)
+				p.clientConnCloseHandler(clientConn, m)
+			case zpp.MSG_TYPE_CONN_CREATE:
+				log.Printf("Proxy#receiveClientMsg : receive client conn create , cliID is : %v , cID is : %v , sID is : %v !", cliID, cID, sID)
+				p.clientConnCreateHandler(clientConn, m)
 			case zpp.MSG_TYPE_CONN_HB:
 				log.Printf("Proxy#receiveClientMsg : receive client heart beat , cliID is : %v , cID is : %v , sID is : %v !", cliID, cID, sID)
 				p.clientHBHandler(clientConn, m)
@@ -298,260 +300,21 @@ func (p *Proxy) receiveClientMsg(clientConn *zpnet.IPConn) {
 	}
 
 }
-func (p *Proxy) sendBrowserConnCreateEvent(clientConn, browserConn net.Conn, clientWannaProxyPort string, cliID, cID, sID uint16) (success bool) {
-	m := zppnew.NewMessage(p.IPPVersion, zppnew.SetV2Secret(p.V2Secret))
-	m.ForConnCreate([]byte(clientWannaProxyPort), cliID, cID, sID)
-	//marshal
-	b := m.Marshall()
-	zppLen := make([]byte, 4, 4)
-	binary.BigEndian.PutUint32(zppLen, uint32(len(b)))
-	b = append(zppLen, b...)
-	_, err := clientConn.Write(b)
-	if err != nil {
-		log.Printf("Proxy#sendBrowserConnCreateEvent : notify client conn create err , cliID is : %v , cID is : %v , sID is : %v , err is : %v !", cliID, cID, sID, err.Error())
-		err = browserConn.Close()
-		if err != nil {
-			log.Printf("Proxy#sendBrowserConnCreateEvent : after notify client conn create , close conn err , cliID is : %v , cID is : %v , sID is : %v , err is : %v !", cliID, cID, sID, err.Error())
-		}
-		return false
-	}
-	return true
-}
-func (p *Proxy) sendBrowserConnCloseEvent(clientConn net.Conn, cliID, cID, sID uint16) {
-	m := zppnew.NewMessage(p.IPPVersion, zppnew.SetV2Secret(p.V2Secret))
-	m.ForConnClose([]byte{}, cliID, cID, sID)
-	//marshal
-	b := m.Marshall()
-	zppLen := make([]byte, 4, 4)
-	binary.BigEndian.PutUint32(zppLen, uint32(len(b)))
-	b = append(zppLen, b...)
-	_, err := clientConn.Write(b)
-	if err != nil {
-		log.Printf("Proxy#sendBrowserConnCloseEvent : notify client conn close err , cliID is : %v , cID is : %v , sID is : %v , err is : %v !", cliID, cID, sID, err.Error())
-		return
-	}
-	return
-}
 
 // clientHelloHandler
 //  处理client发送过来的hello
-func (p *Proxy) clientHelloHandler(clientConn *zpnet.IPConn, clientWannaProxyPort string, cliID, sID uint16) {
-	clientWannaProxyPorts := strings.Split(clientWannaProxyPort, ",")
-	for _, port := range clientWannaProxyPorts {
-		// 监听client想监听的端口
-		err := p.listenBrowser(clientConn, port, cliID, sID)
-		if err != nil {
-			// say hello to client , if listen fail , return "" port to client
-			p.sayHello(clientConn, "", sID)
-			return
-		}
-
-	}
-	// say hello to client , if listen fail , return "" port to client
-	p.sayHello(clientConn, clientWannaProxyPort, sID)
-}
-
-// listenBrowser
-//  监听browser信息
-func (p *Proxy) listenBrowser(clientConn *zpnet.IPConn, clientWannaProxyPort string, cliID, sID uint16) (err error) {
-
-	// listen clientWannaProxyPort. data from browser , to client
-	lis, err := net.Listen("tcp", ":"+clientWannaProxyPort)
-	if err != nil {
-		log.Printf("Proxy#listenBrowser : listen clientWannaProxyPort err , err is : %v !", err)
-		return err
-	}
-	bl := zpnet.NewIPListener(lis)
-	bl.AddCloseTrigger(func(listener net.Listener) {
-		log.Printf("Proxy#listenBrowser : browser listener close by self !")
-	}, &zpnet.ListenerCloseTrigger{
-		Signal: p.stopSignal,
-		Handler: func(listener net.Listener) {
-			log.Printf("Proxy#listenBrowser : browser listener close by stopSignal !")
-			bl.Close()
-		},
-	}, &zpnet.ListenerCloseTrigger{
-		Signal: clientConn.CloseSignal(),
-		Handler: func(listener net.Listener) {
-			log.Printf("Proxy#listenBrowser : browser listener close by client conn closeSignal !")
-			bl.Close()
-		},
-	}, &zpnet.ListenerCloseTrigger{
-		Signal: p.destroySignal,
-		Handler: func(listener net.Listener) {
-			log.Printf("Proxy#listenBrowser : browser listener close by destroySignal !")
-			bl.Close()
-		},
-	})
-	log.Printf("Proxy#listenBrowser : listen browser port is : %v !", clientWannaProxyPort)
-	go func() {
-		for {
-			select {
-			case <-bl.CloseSignal():
-				log.Println("Proxy#listenBrowser : get browser listener close signal , we will stop accept browser conn !")
-				return
-			default:
-				// when listener stop , we stop accept
-				c, err := bl.Accept()
-				if err != nil {
-					log.Printf("Proxy#listenBrowser : accept browser conn err , err is : %v !", err.Error())
-					break
-				}
-				// cID sID
-				cID := p.newSerialNo()
-				sID := p.newSerialNo()
-				// trans to zp net
-				bc := zpnet.NewIPConn(c)
-				bc.AddCloseTrigger(func(conn net.Conn) {
-					log.Println("Proxy#listenBrowser : browser conn close by self !")
-					p.browserConnRID.Delete(cID)
-					p.sendBrowserConnCloseEvent(clientConn, cliID, cID, sID)
-					return
-				}, &zpnet.ConnCloseTrigger{
-					Signal: p.stopSignal,
-					Handler: func(conn net.Conn) {
-						log.Println("Proxy#listenBrowser : browser conn close by stopSignal !")
-						p.browserConnRID.Delete(cID)
-						p.sendBrowserConnCloseEvent(clientConn, cliID, cID, sID)
-						return
-					},
-				}, &zpnet.ConnCloseTrigger{
-					Signal: p.destroySignal,
-					Handler: func(conn net.Conn) {
-						log.Println("Proxy#listenBrowser : browser conn close by destroySignal !")
-						p.browserConnRID.Delete(cID)
-						p.sendBrowserConnCloseEvent(clientConn, cliID, cID, sID)
-						return
-					},
-				}, &zpnet.ConnCloseTrigger{
-					Signal: bl.CloseSignal(),
-					Handler: func(conn net.Conn) {
-						log.Println("Proxy#listenBrowser : browser conn close by browser listener closeSignal !")
-						p.browserConnRID.Delete(cID)
-						p.sendBrowserConnCloseEvent(clientConn, cliID, cID, sID)
-						return
-					},
-				}, &zpnet.ConnCloseTrigger{
-					Signal: clientConn.CloseSignal(),
-					Handler: func(conn net.Conn) {
-						log.Println("Proxy#listenBrowser : browser conn close by client conn closeSignal !")
-						p.browserConnRID.Delete(cID)
-						p.sendBrowserConnCloseEvent(clientConn, cliID, cID, sID)
-						return
-					},
-				})
-				// rem browser conn and notify client
-				p.browserConnRID.Store(cID, bc)
-				p.sendBrowserConnCreateEvent(clientConn, bc, clientWannaProxyPort, cliID, cID, sID)
-				log.Printf("Proxy#listenBrowser : accept a browser conn success , cliID is : %v , cID is : %v , sID is : %v , clientWannaProxyPort is : %v , browser addr is : %v !", cliID, cID, sID, clientWannaProxyPort, bc.RemoteAddr())
-			}
-		}
-	}()
-	return nil
-}
-
-// clientConnCreateDoneHandler
-//  开始监听用户发送的消息
-func (p *Proxy) clientConnCreateDoneHandler(clientConn *zpnet.IPConn, cliID, cID, sID uint16) {
-	v, ok := p.browserConnRID.Load(cID)
-	if !ok {
-		return
-	}
-	browserConn, _ := v.(*zpnet.IPConn)
-	if browserConn == nil {
-		return
-	}
-	// read browser request
-	bs := make([]byte, 4096, 4096)
-	go func() {
-		for {
-			select {
-			case <-browserConn.CloseSignal():
-				log.Printf("Proxy#clientConnCreateDoneHandler : get browser conn close signal , will stop read browser conn , cliID is : %v , cID is : %v , sID is : %v !", cliID, cID, sID)
-				return
-			default:
-				log.Printf("Proxy#proxyCreateBrowserConnHandler : wait receive browser msg , cliID is : %v , cID is : %v , sID is : %v !", cliID, cID, sID)
-				// build protocol to client
-				sID := p.newSerialNo()
-				n, err := browserConn.Read(bs)
-				s := bs[0:n]
-				if err != nil {
-					log.Printf("Proxy#clientConnCreateDoneHandler : read browser data err , cliID is : %v , cID is : %v , sID is : %v , err is : %v !", cliID, cID, sID, err.Error())
-					continue
-				}
-				//if n <= 0 {
-				//	continue
-				//}
-				log.Printf("Proxy#clientConnCreateDoneHandler : accept browser req , cliID is : %v , cID is : %v , sID is : %v , len is : %v !", cliID, cID, sID, n)
-				m := zppnew.NewMessage(p.IPPVersion, zppnew.SetV2Secret(p.V2Secret))
-				m.ForReq(s, cliID, cID, sID)
-				//marshal
-				b := m.Marshall()
-				zppLen := make([]byte, 4, 4)
-				binary.BigEndian.PutUint32(zppLen, uint32(len(b)))
-				b = append(zppLen, b...)
-				n, err = clientConn.Write(b)
-				if err != nil {
-					log.Printf("Proxy#clientConnCreateDoneHandler : send browser data to client err , cliID is : %v , cID is : %v , sID is : %v , err is : %v !", cliID, cID, sID, err.Error())
-					continue
-				}
-				log.Printf("Proxy#clientConnCreateDoneHandler : from proxy to client , cliID is : %v , cID is : %v , sID is : %v , len is : %v !", cliID, cID, sID, n)
-			}
-		}
-	}()
-}
-
-func (p *Proxy) clientConnCloseHandler(cliID, cID, sID uint16) {
-	v, ok := p.browserConnRID.Load(cID)
-	if !ok {
-		return
-	}
-	browserConn, _ := v.(net.Conn)
-	if browserConn == nil {
-		return
-	}
-	p.browserConnRID.Delete(cID)
-	err := browserConn.Close()
-	if err != nil {
-		log.Printf("Proxy#clientConnCloseHandler : after receive client conn close , close browser conn err , cliID is : %v , cID is : %v , sID is : %v , err is : %v !", cliID, cID, sID, err.Error())
-	}
-}
-
-func (p *Proxy) clientReqHandler(clientConn net.Conn, m zpp.Message) {
-	cID := m.CID()
-	sID := m.SerialId()
-	cliID := m.CliID()
-	v, ok := p.browserConnRID.Load(cID)
-	if !ok {
-		return
-	}
-	browserConn, _ := v.(net.Conn)
-	if browserConn == nil {
-		return
-	}
-	data := m.AttributeByType(zpp.ATTR_TYPE_BODY)
-	//if len(data) <= 0 {
-	//	return
-	//}
-	n, err := browserConn.Write(data)
-	if err != nil {
-		log.Printf("Proxy#clientReqHandler : from client to browser err , cliID is : %v , cID is : %v , sID is : %v , err is : %v !", cliID, cID, sID, err.Error())
-		return
-	}
-	log.Printf("Proxy#clientReqHandler : from client to browser success , cliID is : %v , cID is : %v , sID is : %v , data len is : %v !", cliID, cID, sID, n)
+func (p *Proxy) clientHelloHandler(clientConn *zpnet.IPConn, cliID, sID uint16) {
+	// say hello to client
+	p.sayHello(clientConn, sID)
 }
 
 // sayHello
-//  如果port为空，那么代表监听browser失败，port被占用？
-func (p *Proxy) sayHello(clientConn net.Conn, port string, sID uint16) {
+func (p *Proxy) sayHello(clientConn net.Conn, sID uint16) {
 	// return client hello
 	cliID := p.newCID()
 	errCode := byte(0)
-	if port == "" {
-		errCode = zpp.ERROR_CODE_BROWSER_PORT_OCUP
-	}
 	m := zppnew.NewMessage(p.IPPVersion, zppnew.SetV2Secret(p.V2Secret))
-	m.ForServerHelloReq([]byte(strconv.FormatInt(int64(cliID), 10)), []byte(port), sID, errCode)
+	m.ForServerHelloReq([]byte(strconv.FormatInt(int64(cliID), 10)), sID, errCode)
 	//marshal
 	b := m.Marshall()
 	zppLen := make([]byte, 4, 4)
@@ -589,4 +352,181 @@ func (p *Proxy) checkClientHB(clientConn *zpnet.IPConn) {
 	<-clientConn.GetHeartBeatTimer().C
 	log.Printf("Proxy#checkClientHB : not receive the client heart beat , client info is : %v->%v !", clientConn.LocalAddr(), clientConn.RemoteAddr())
 	clientConn.Close()
+}
+
+func (p *Proxy) getTargetInfo(b []byte) (method, host, address string) {
+	defer func() {
+		if err := recover(); err != nil {
+			log.Printf("Proxy#getTargetInfo : panic is : %v !", err)
+		}
+	}()
+	log.Printf("Proxy#getTargetInfo : info is : %v !", string(b))
+	fmt.Sscanf(string(b[:bytes.IndexByte(b[:], '\n')]), "%s%s", &method, &host)
+	hostPortURL, err := url.Parse(host)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	if hostPortURL.Opaque == "443" { //https访问
+		address = hostPortURL.Scheme + ":443"
+	} else { //http访问
+		if strings.Index(hostPortURL.Host, ":") == -1 { //host不带端口， 默认80
+			address = hostPortURL.Host + ":80"
+		} else {
+			address = hostPortURL.Host
+		}
+	}
+	return method, host, address
+}
+
+func (p *Proxy) clientConnCloseHandler(clientConn *zpnet.IPConn, message zpp.Message) {
+	cID := message.CID()
+	cliID := message.CliID()
+	sID := message.SerialId()
+	c, ok := p.browserConnRID.Load(cID)
+	if !ok {
+		log.Printf("Proxy#clientConnCloseHandler : can't find browser conn , cliID is : %v , sID is : %v !", cliID, sID)
+		return
+	}
+	if c == nil {
+		log.Printf("Proxy#clientConnCloseHandler : get nil browser conn , cliID is : %v , sID is : %v !", cliID, sID)
+		return
+	}
+	conn, _ := c.(*zpnet.IPConn)
+	if conn == nil {
+		log.Printf("Proxy#clientConnCloseHandler : parse browser conn to zpnet.IPConn fail , cliID is : %v , sID is : %v !", cliID, sID)
+		return
+	}
+	conn.Close()
+}
+
+// clientReqHandler
+func (p *Proxy) clientReqHandler(clientConn net.Conn, m zpp.Message) {
+	cID := m.CID()
+	cliID := m.CliID()
+	sID := m.SerialId()
+	data := m.AttributeByType(zpp.ATTR_TYPE_BODY)
+	c, ok := p.browserConnRID.Load(cID)
+	if !ok {
+		log.Printf("Proxy#clientReqHandler : can't find browser conn , cliID is : %v , sID is : %v !", cliID, sID)
+		return
+	}
+	if c == nil {
+		log.Printf("Proxy#clientReqHandler : get nil browser conn , cliID is : %v , sID is : %v !", cliID, sID)
+		return
+	}
+	conn, _ := c.(*zpnet.IPConn)
+	if conn == nil {
+		log.Printf("Proxy#clientReqHandler : parse browser conn to zpnet.IPConn fail , cliID is : %v , sID is : %v !", cliID, sID)
+		return
+	}
+	conn.Write(data)
+}
+
+func (p *Proxy) clientConnCreateHandler(clientConn *zpnet.IPConn, message zpp.Message) {
+	go func() {
+		cID := message.CID()
+		cliID := message.CliID()
+		sID := message.SerialId()
+		body := message.AttributeByType(zpp.ATTR_TYPE_BODY)
+		method, host, address := p.getTargetInfo(body)
+		log.Printf("Proxy#clientConnCreateHandler : receive info , cliID is : %v , sID is : %v , method is : %v , host is : %v , address is : %v , msg is :%v !", cliID, sID, method, host, address, string(body))
+		if method == "CONNECT" {
+			//获得了请求的host和port，就开始拨号吧
+			log.Printf("Proxy#clientConnCreateHandler : dial web start , cliID is : %v , sID is : %v , method is : %v , host is : %v , address is : %v !", cliID, sID, method, host, address)
+			c, err := net.Dial("tcp", address)
+			if err != nil {
+				log.Printf("Proxy#clientConnCreateHandler : dial web err , cliID is : %v , sID is : %v , method is : %v , host is : %v , address is : %v , err is : %v !", cliID, sID, method, host, address, err.Error())
+				return
+			}
+			log.Printf("Proxy#clientConnCreateHandler : dial web success , cliID is : %v , sID is : %v , method is : %v , host is : %v , address is : %v !", cliID, sID, method, host, address)
+			p.sendConnCreateDoneEvent(clientConn, cliID, cID, sID)
+			browserConn := zpnet.NewIPConn(c)
+			browserConn.AddCloseTrigger(func(conn net.Conn) {
+				log.Printf("Proxy#clientConnCreateHandler : browser conn close by self !")
+				sID := p.newSerialNo()
+				p.sendConnCloseEvent(clientConn, cliID, cID, sID)
+				conn.Close()
+			}, &zpnet.ConnCloseTrigger{
+				Signal: p.stopSignal,
+				Handler: func(conn net.Conn) {
+					log.Printf("Proxy#clientConnCreateHandler : browser conn close by client stopSignal !")
+					conn.Close()
+				},
+			}, &zpnet.ConnCloseTrigger{
+				Signal: p.destroySignal,
+				Handler: func(conn net.Conn) {
+					log.Printf("Proxy#clientConnCreateHandler : browser conn close by client destroySignal !")
+					conn.Close()
+				},
+			})
+			p.browserConnRID.Store(cID, browserConn)
+			go func() {
+				bs := make([]byte, 2048, 2048)
+				for {
+					select {
+					case <-browserConn.CloseSignal():
+						log.Printf("Proxy#clientConnCreateHandler : browser conn close signal !")
+						return
+					default:
+						n, err := browserConn.Read(bs)
+						if err != nil {
+							log.Println(err)
+							return
+						}
+						sID := p.newSerialNo()
+						log.Printf("Proxy#clientConnCreateHandler : get web info , cliID is : %v , sID is : %v , info is : %v !", cliID, sID, string(bs))
+						m := zppnew.NewMessage(p.IPPVersion, zppnew.SetV2Secret(p.V2Secret))
+						m.ForReq(bs[0:n], cliID, cID, sID)
+						//marshal
+						b := m.Marshall()
+						zppLen := make([]byte, 4, 4)
+						binary.BigEndian.PutUint32(zppLen, uint32(len(b)))
+						b = append(zppLen, b...)
+						_, err = clientConn.Write(b)
+						if err != nil {
+							log.Printf("Proxy#clientConnCreateHandler : send web info to client app , cliID is : %v , sID is : %v , err is : %v !", cliID, sID, err.Error())
+							return
+						}
+
+					}
+				}
+			}()
+
+		}
+	}()
+
+}
+
+func (p *Proxy) sendConnCreateDoneEvent(clientConn *zpnet.IPConn, cliID, cID, sID uint16) {
+	m := zppnew.NewMessage(p.IPPVersion, zppnew.SetV2Secret(p.V2Secret))
+	m.ForConnCreateDone([]byte{}, 0, cID, sID)
+	//marshal
+	b := m.Marshall()
+	zppLen := make([]byte, 4, 4)
+	binary.BigEndian.PutUint32(zppLen, uint32(len(b)))
+	b = append(zppLen, b...)
+	_, err := clientConn.Write(b)
+	if err != nil {
+		log.Printf("Proxy#sendConnCreateDoneEvent : write data to proxy conn err , cliID is : %v , cID is : %v , sID is : %v , err is : %v !", cliID, cID, sID, err.Error())
+	}
+	log.Printf("Proxy#sendConnCreateDoneEvent : notify conn create done , cliID is : %v , cID is : %v , sID is : %v !", cliID, cID, sID)
+
+}
+
+// sendConnCloseEvent
+func (p *Proxy) sendConnCloseEvent(clientConn *zpnet.IPConn, cliID, cID uint16, sID uint16) {
+	m := zppnew.NewMessage(p.IPPVersion, zppnew.SetV2Secret(p.V2Secret))
+	m.ForConnClose([]byte{}, 0, cID, sID)
+	//marshal
+	b := m.Marshall()
+	zppLen := make([]byte, 4, 4)
+	binary.BigEndian.PutUint32(zppLen, uint32(len(b)))
+	b = append(zppLen, b...)
+	_, err := clientConn.Write(b)
+	if err != nil {
+		log.Printf("Proxy#sendConnCloseEvent : write data to proxy conn err , cliID is : %v , cID is : %v , sID is : %v , err is : %v !", cliID, cID, sID, err.Error())
+	}
+	log.Printf("Proxy#sendConnCloseEvent : notify conn close , cliID is : %v , cID is : %v , sID is : %v !", cliID, cID, sID)
 }

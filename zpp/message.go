@@ -38,8 +38,6 @@ const (
 
 const (
 	_ = iota
-	// brwoser端口被占用
-	ERROR_CODE_BROWSER_PORT_OCUP = iota
 	// 版本不匹配
 	ERROR_CODE_VERSION_NOT_MATCH = iota
 )
@@ -55,8 +53,8 @@ type Message interface {
 	Version() byte
 	Attribute(int) Attr
 	AttributeByType(byte) []byte
-	ForClientHelloReq(port []byte, sID uint16)
-	ForServerHelloReq(cliID []byte, port []byte, sID uint16, errCode byte)
+	ForClientHelloReq(sID uint16)
+	ForServerHelloReq(cliID []byte, sID uint16, errCode byte)
 	ForReq(body []byte, cliID, cID, sID uint16)
 	ForConnCreate(body []byte, cliID, cID, sID uint16)
 	ForConnClose(body []byte, cliID, cID, sID uint16)

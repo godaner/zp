@@ -210,7 +210,7 @@ func (m *Message) ForConnCreate(body []byte, cliID, cID, sID uint16) {
 	m.newMessage(zpp.MSG_TYPE_CONN_CREATE, cliID, cID, sID, 0)
 	m.Attr = []Attr{
 		{
-			AT: zpp.ATTR_TYPE_PORT, AL: uint16(len(body)), AV: body,
+			AT: zpp.ATTR_TYPE_BODY, AL: uint16(len(body)), AV: body,
 		},
 	}
 	m.Header.HAttrNum = byte(len(m.Attr))
@@ -220,22 +220,14 @@ func (m *Message) ForConnClose(body []byte, cliID, cID, sID uint16) {
 	m.newMessage(zpp.MSG_TYPE_CONN_CLOSE, cliID, cID, sID, 0)
 }
 
-func (m *Message) ForClientHelloReq(port []byte, sID uint16) {
+func (m *Message) ForClientHelloReq(sID uint16) {
 	m.newMessage(zpp.MSG_TYPE_CLIENT_HELLO, 0, 0, sID, 0)
-	m.Attr = []Attr{
-		{
-			AT: zpp.ATTR_TYPE_PORT, AL: uint16(len(port)), AV: port,
-		},
-	}
 	m.Header.HAttrNum = byte(len(m.Attr))
 }
 
-func (m *Message) ForServerHelloReq(cliID []byte, port []byte, sID uint16, errCode byte) {
+func (m *Message) ForServerHelloReq(cliID []byte,sID uint16, errCode byte) {
 	m.newMessage(zpp.MSG_TYPE_PROXY_HELLO, 0, 0, sID, errCode)
 	m.Attr = []Attr{
-		{
-			AT: zpp.ATTR_TYPE_PORT, AL: uint16(len(port)), AV: port,
-		},
 		{
 			AT: zpp.ATTR_TYPE_CLI_ID, AL: uint16(len(cliID)), AV: cliID,
 		},
