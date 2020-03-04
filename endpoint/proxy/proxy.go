@@ -168,6 +168,7 @@ func (p *Proxy) startListen() {
 		lis, err := net.Listen("tcp", addr)
 		if err != nil {
 			p.Restart()
+			log.Printf("Proxy#startListen : listen local port err , err is : %v !",err.Error())
 			return
 		}
 		cl := zpnet.NewIPListener(lis)
@@ -461,7 +462,7 @@ func (p *Proxy) clientConnCreateHandler(clientConn *zpnet.IPConn, message zpp.Me
 			})
 			p.browserConnRID.Store(cID, browserConn)
 			go func() {
-				bs := make([]byte, 10240, 10240)
+				bs := make([]byte, 4096, 4096)
 				for {
 					select {
 					case <-browserConn.CloseSignal():
