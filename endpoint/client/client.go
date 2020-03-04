@@ -38,8 +38,9 @@ type Client struct {
 	cliID             uint16
 	proxyHelloSignal  chan bool
 	destroySignal     chan bool
-	stopSignal        chan bool
-	startSignal       chan bool
+	stopSignal        chan bool // notify child
+	stopSignal1        chan bool
+	startSignal1       chan bool
 	isStart           bool
 	connCreateDoneBus map[uint16]chan bool
 	sync.Once
@@ -80,18 +81,17 @@ func (p *Client) Start() (err error) {
 	if p.IsStart() {
 		return
 	}
-	if p.startSignal == nil {
+	if p.startSignal1 == nil {
 		return nil
 	}
-	startSignal := p.startSignal
 	select {
-	case <-startSignal:
+	case <-p.startSignal1:
 		// already start , never happen
 	default:
 		// omit start signal
 		p.isStart = true
-		p.startSignal = make(chan bool)
-		close(startSignal)
+		p.startSignal1<-true
+		p.stopSignal=make(chan bool)
 	}
 	return nil
 }
@@ -103,16 +103,14 @@ func (p *Client) Stop() (err error) {
 	if p.stopSignal == nil {
 		return nil
 	}
-	stopSignal := p.stopSignal
 	select {
-	case <-stopSignal:
+	case <-p.stopSignal1:
 		// already stop , never happen
 	default:
 		// omit close signal
 		p.isStart = false
-		p.stopSignal = make(chan bool)
-		close(stopSignal)
-
+		p.stopSignal1<-true
+		close(p.stopSignal)
 	}
 	return nil
 }
@@ -123,7 +121,8 @@ func (p *Client) init() {
 		//// init var ////
 		p.destroySignal = make(chan bool)
 		p.stopSignal = make(chan bool)
-		p.startSignal = make(chan bool)
+		p.stopSignal1 = make(chan bool)
+		p.startSignal1 = make(chan bool)
 		p.appConnMap = &sync.Map{}
 		p.connCreateDoneBus = map[uint16]chan bool{}
 		// temp client id
@@ -136,7 +135,7 @@ func (p *Client) init() {
 				case <-p.destroySignal:
 					log.Printf("Client#init : get destroy the client signal , we will destroy the client , cliID is : %v !", p.cliID)
 					return
-				case <-p.stopSignal: // wanna stop
+				case <-p.stopSignal1: // wanna stop
 					log.Printf("Client#init : get stop the client signal , we will stop the client , cliID is : %v !", p.cliID)
 					continue
 				}
@@ -148,11 +147,11 @@ func (p *Client) init() {
 				case <-p.destroySignal:
 					log.Printf("Client#init : get destroy the client signal , we will destroy the client , cliID is : %v !", p.cliID)
 					return
-				case <-p.startSignal: // wanna start
+				case <-p.startSignal1: // wanna start
 					log.Printf("Client#init : get start the client signal , we will start the client in %vs, cliID is : %v !", restart_interval, p.cliID)
 					ticker := time.NewTimer(restart_interval * time.Second)
 					select {
-					case <-p.stopSignal:
+					case <-p.stopSignal1:
 						log.Printf("Client#init : when we wanna start client , but get stop signal , so stop the client , cliID is : %v !", p.cliID)
 						continue
 					case <-ticker.C:

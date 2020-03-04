@@ -35,7 +35,8 @@ type Proxy struct {
 	seq            int32
 	destroySignal  chan bool
 	stopSignal     chan bool
-	startSignal    chan bool
+	stopSignal1     chan bool
+	startSignal1    chan bool
 	isStart        bool
 	sync.Once
 }
@@ -69,6 +70,25 @@ func (p *Proxy) Restart() error {
 	return nil
 }
 
+func (p *Proxy) Start() (err error) {
+	p.init()
+	if p.IsStart() {
+		return
+	}
+	if p.startSignal1 == nil {
+		return nil
+	}
+	select {
+	case <-p.startSignal1:
+		// already start , never happen
+	default:
+		// omit start signal
+		p.isStart = true
+		p.startSignal1<-true
+		p.stopSignal=make(chan bool)
+	}
+	return nil
+}
 func (p *Proxy) Stop() (err error) {
 	p.init()
 	if !p.IsStart() {
@@ -77,48 +97,25 @@ func (p *Proxy) Stop() (err error) {
 	if p.stopSignal == nil {
 		return nil
 	}
-	stopSignal := p.stopSignal
 	select {
-	case <-stopSignal:
+	case <-p.stopSignal1:
 		// already stop , never happen
 	default:
 		// omit close signal
 		p.isStart = false
-		p.stopSignal = make(chan bool)
-		close(stopSignal)
-
+		p.stopSignal1<-true
+		close(p.stopSignal)
 	}
 	return nil
 }
-
-func (p *Proxy) Start() (err error) {
-	p.init()
-	if p.IsStart() {
-		return
-	}
-	if p.startSignal == nil {
-		return nil
-	}
-	startSignal := p.startSignal
-	select {
-	case <-startSignal:
-		// already start , never happen
-	default:
-		// omit start signal
-		p.isStart = true
-		p.startSignal = make(chan bool)
-		close(startSignal)
-	}
-	return nil
-}
-
 // init
 func (p *Proxy) init() {
 	p.Do(func() {
 		//// init var ////
 		p.destroySignal = make(chan bool)
+		p.stopSignal1 = make(chan bool)
 		p.stopSignal = make(chan bool)
-		p.startSignal = make(chan bool)
+		p.startSignal1 = make(chan bool)
 
 		//// log ////
 		p.browserConnRID = sync.Map{} // map[uint16]net.Conn{}
@@ -128,7 +125,7 @@ func (p *Proxy) init() {
 				case <-p.destroySignal:
 					log.Printf("Proxy#init : get destroy the proxy signal , we will destroy the proxy !")
 					return
-				case <-p.stopSignal:
+				case <-p.stopSignal1:
 					log.Printf("Proxy#init : get stop the proxy signal , we will stop the proxy !")
 					continue
 				}
@@ -140,11 +137,11 @@ func (p *Proxy) init() {
 				case <-p.destroySignal:
 					log.Printf("Proxy#init : get destroy the proxy signal , we will destroy the proxy !")
 					return
-				case <-p.startSignal: // wanna start
+				case <-p.startSignal1: // wanna start
 					log.Printf("Proxy#init : get start the proxy signal , we will start the proxy in %vs !", restart_interval)
 					ticker := time.NewTimer(restart_interval * time.Second)
 					select {
-					case <-p.stopSignal:
+					case <-p.stopSignal1:
 						log.Printf("Proxy#init : when we wanna start proxy , but get stop signal , so stop the proxy !")
 						continue
 					case <-ticker.C:
