@@ -176,6 +176,7 @@ func (p *Proxy) startListen() {
 		cl := zpnet.NewIPListener(lis)
 		cl.AddCloseTrigger(func(listener net.Listener) {
 			log.Printf("Proxy#startListen : client listener close by self !")
+			p.Restart()
 		}, &zpnet.ListenerCloseTrigger{
 			Signal: p.stopSignal,
 			Handler: func(listener net.Listener) {
