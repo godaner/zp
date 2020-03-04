@@ -476,7 +476,7 @@ func (p *Proxy) clientConnCreateHandler(clientConn *zpnet.IPConn, message zpp.Me
 							return
 						}
 						sID := p.newSerialNo()
-						log.Printf("Proxy#clientConnCreateHandler : get web info , cliID is : %v , sID is : %v , info is : %v !", cliID, sID, string(bs))
+						log.Printf("Proxy#clientConnCreateHandler : get web info , cliID is : %v , sID is : %v , data len is : %v !", cliID, sID, len(bs[0:n]))
 						m := zppnew.NewMessage(p.IPPVersion, zppnew.SetV2Secret(p.V2Secret))
 						m.ForReq(bs[0:n], cliID, cID, sID)
 						//marshal

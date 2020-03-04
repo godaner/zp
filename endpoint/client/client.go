@@ -538,7 +538,7 @@ func (p *Client) handleAppConnRequest(appConn *zpnet.IPConn, cID uint16) {
 				log.Printf("Client#handleAppConnRequest : write data to proxy conn err , cliID is : %v , cID is : %v , sID is : %v , err is : %v !", p.cliID, cID, sID, err.Error())
 				return
 			}
-			log.Printf("Client#handleAppConnRequest : send data to proxy , cliID is : %v , cID is : %v , sID is : %v , data is : %v !", p.cliID, cID, sID, string(bs))
+			log.Printf("Client#handleAppConnRequest : send data to proxy , cliID is : %v , cID is : %v , sID is : %v , data len is : %v !", p.cliID, cID, sID, len(bs[0:n]))
 		}
 	}
 
