@@ -195,12 +195,12 @@ func (p *Client) listenProxy() {
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
 		log.Printf("Client#listenProxy : dial proxy addr err , cliID is : %v , err is : %v !", p.cliID, err)
+		p.Restart()
 		return
 	}
 	p.proxyConn = zpnet.NewIPConn(c)
 	p.proxyConn.AddCloseTrigger(func(conn net.Conn) {
 		log.Printf("Client#listenProxy : proxy conn is close by self , cliID is : %v  !", p.cliID)
-		p.Restart()
 	}, &zpnet.ConnCloseTrigger{
 		Signal: p.stopSignal,
 		Handler: func(conn net.Conn) {
@@ -430,7 +430,6 @@ func (p *Client) listenApp() {
 	appLis := zpnet.NewIPListener(l)
 	appLis.AddCloseTrigger(func(listener net.Listener) {
 		log.Printf("Client#listenApp : app listener is close by self , cliID is : %v  !", p.cliID)
-		p.Restart()
 	}, &zpnet.ListenerCloseTrigger{
 		Signal: p.stopSignal,
 		Handler: func(l net.Listener) {
@@ -453,7 +452,7 @@ func (p *Client) listenApp() {
 			c, err := appLis.Accept()
 			if err != nil {
 				log.Printf("Client#listenApp : app listener accept conn err , cliID is : %v ,err is : %v !", p.cliID, err.Error())
-				//p.Restart()
+				p.Restart()
 				return
 			}
 
@@ -465,7 +464,6 @@ func (p *Client) listenApp() {
 			// add trigger
 			appConn.AddCloseTrigger(func(conn net.Conn) {
 				log.Printf("Client#listenApp : app conn is close by self , cliID is : %v  !", p.cliID)
-				//p.Restart()
 				sID:=p.newSerialNo()
 				p.sendConnCloseEvent(cID,sID)
 				appConn.Close()
