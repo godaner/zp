@@ -195,7 +195,6 @@ func (p *Client) listenProxy() {
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
 		log.Printf("Client#listenProxy : dial proxy addr err , cliID is : %v , err is : %v !", p.cliID, err)
-		p.Restart()
 		return
 	}
 	p.proxyConn = zpnet.NewIPConn(c)

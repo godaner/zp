@@ -463,7 +463,7 @@ func (p *Proxy) clientConnCreateHandler(clientConn *zpnet.IPConn, message zpp.Me
 			})
 			p.browserConnRID.Store(cID, browserConn)
 			go func() {
-				bs := make([]byte, 2048, 2048)
+				bs := make([]byte, 4096, 4096)
 				for {
 					select {
 					case <-browserConn.CloseSignal():
