@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/godaner/zp/endpoint"
 	zpnet "github.com/godaner/zp/net"
 	"github.com/godaner/zp/zpp"
 	"github.com/godaner/zp/zpp/zppnew"
@@ -33,21 +34,24 @@ type Client struct {
 	TempCliID         uint16
 	V2Secret          string
 	appConnMap        *sync.Map
+	connCreateDoneBus *sync.Map // map[uint16]chan bool
 	proxyConn         *zpnet.IPConn
 	seq               int32
 	cliID             uint16
 	proxyHelloSignal  chan bool
 	destroySignal     chan bool
-	stopSignal        chan bool // notify child
-	stopSignal1        chan bool
-	startSignal1       chan bool
-	isStart           bool
-	connCreateDoneBus map[uint16]chan bool
+	stopSignal        chan bool
+	startSignal       chan bool
+	S            endpoint.Status
 	sync.Once
+	startOnce sync.Once
+	stopOnce  sync.Once
 }
 
 func (p *Client) Destroy() error {
+	p.init()
 	close(p.destroySignal)
+	p.S = endpoint.Status_Destroied
 	return nil
 }
 
@@ -56,62 +60,61 @@ func (p *Client) GetID() (id uint16) {
 	return p.cliID
 }
 
-func (p *Client) IsStart() bool {
+func (p *Client) Status() endpoint.Status {
 	p.init()
-	return p.isStart
+	return p.S
 }
 
 func (p *Client) Restart() error {
 	p.init()
-	if p.IsStart() {
-		err := p.Stop()
-		if err != nil {
-			return err
-		}
-	}
-	err := p.Start()
-	if err != nil {
-		return err
-	}
+	p.stop()
+	log.Printf("Client#Restart : pls wait %vs , the client is restarting , cliID is : %v !", restart_interval, p.cliID)
+	<-time.After(time.Duration(restart_interval) * time.Second)
+	p.start()
 	return nil
 }
 
 func (p *Client) Start() (err error) {
 	p.init()
-	if p.IsStart() {
-		return
-	}
-	if p.startSignal1 == nil {
-		return nil
-	}
-	select {
-	case <-p.startSignal1:
-		// already start , never happen
-	default:
+	p.start()
+	return nil
+}
+func (p *Client) start() (err error) {
+	p.startOnce.Do(func() {
+		if p.S == endpoint.Status_Started {
+			return
+		}
+		if p.startSignal == nil {
+			return
+		}
 		// omit start signal
-		p.isStart = true
-		p.startSignal1<-true
-		p.stopSignal=make(chan bool)
-	}
+		p.S = endpoint.Status_Started
+		p.startSignal <- true
+
+		p.stopOnce = sync.Once{}
+	})
 	return nil
 }
 func (p *Client) Stop() (err error) {
 	p.init()
-	if !p.IsStart() {
-		return
-	}
-	if p.stopSignal == nil {
-		return nil
-	}
-	select {
-	case <-p.stopSignal1:
-		// already stop , never happen
-	default:
+	p.stop()
+	return nil
+}
+func (p *Client) stop() (err error) {
+	p.stopOnce.Do(func() {
+		if p.S == endpoint.Status_Stoped {
+			return
+		}
+		if p.stopSignal == nil {
+			return
+		}
 		// omit close signal
-		p.isStart = false
-		p.stopSignal1<-true
 		close(p.stopSignal)
-	}
+		p.stopSignal = make(chan bool)
+		p.S = endpoint.Status_Stoped
+
+		p.startOnce = sync.Once{}
+	})
 	return nil
 }
 
@@ -121,10 +124,13 @@ func (p *Client) init() {
 		//// init var ////
 		p.destroySignal = make(chan bool)
 		p.stopSignal = make(chan bool)
-		p.stopSignal1 = make(chan bool)
-		p.startSignal1 = make(chan bool)
+		p.startSignal = make(chan bool)
 		p.appConnMap = &sync.Map{}
-		p.connCreateDoneBus = map[uint16]chan bool{}
+		p.startOnce = sync.Once{}
+		p.stopOnce = sync.Once{}
+		p.stopOnce.Do(func() {})
+		p.S = endpoint.Status_Stoped
+		p.connCreateDoneBus = &sync.Map{} //map[uint16]chan bool{}
 		// temp client id
 		p.cliID = p.TempCliID
 		// handler
@@ -132,32 +138,15 @@ func (p *Client) init() {
 		go func() {
 			for {
 				select {
+				//case <-p.stopSignal: // wanna stop
+				//	log.Printf("Client#init : get stop the client signal , we will stop the client , cliID is : %v !", p.cliID)
+				//	continue
 				case <-p.destroySignal:
 					log.Printf("Client#init : get destroy the client signal , we will destroy the client , cliID is : %v !", p.cliID)
 					return
-				case <-p.stopSignal1: // wanna stop
-					log.Printf("Client#init : get stop the client signal , we will stop the client , cliID is : %v !", p.cliID)
-					continue
-				}
-			}
-		}()
-		go func() {
-			for {
-				select {
-				case <-p.destroySignal:
-					log.Printf("Client#init : get destroy the client signal , we will destroy the client , cliID is : %v !", p.cliID)
-					return
-				case <-p.startSignal1: // wanna start
-					log.Printf("Client#init : get start the client signal , we will start the client in %vs, cliID is : %v !", restart_interval, p.cliID)
-					ticker := time.NewTimer(restart_interval * time.Second)
-					select {
-					case <-p.stopSignal1:
-						log.Printf("Client#init : when we wanna start client , but get stop signal , so stop the client , cliID is : %v !", p.cliID)
-						continue
-					case <-ticker.C:
-						go p.listenProxy()
-						continue
-					}
+				case <-p.startSignal: // wanna start
+					log.Printf("Client#init : get start the client signal , we will start the client , cliID is : %v !", p.cliID)
+					go p.listenProxy()
 				}
 			}
 		}()
@@ -187,7 +176,7 @@ func (p *Client) listenProxy() {
 	//// init var ////
 	// reset restart signal
 	p.appConnMap = &sync.Map{}
-	p.connCreateDoneBus = map[uint16]chan bool{}
+	p.connCreateDoneBus = &sync.Map{} //map[uint16]chan bool{}
 
 	//// dial proxy conn ////
 	addr := p.ProxyAddr
@@ -464,8 +453,8 @@ func (p *Client) listenApp() {
 			// add trigger
 			appConn.AddCloseTrigger(func(conn net.Conn) {
 				log.Printf("Client#listenApp : app conn is close by self , cliID is : %v  !", p.cliID)
-				sID:=p.newSerialNo()
-				p.sendConnCloseEvent(cID,sID)
+				sID := p.newSerialNo()
+				p.sendConnCloseEvent(cID, sID)
 				appConn.Close()
 			}, &zpnet.ConnCloseTrigger{
 				Signal: appLis.CloseSignal(),
@@ -516,7 +505,8 @@ func (p *Client) handleAppConnRequest(appConn *zpnet.IPConn, cID uint16) {
 					p.sendConnCreateEvent(bs[0:n], cID, sID)
 					connected = true
 					bus := make(chan bool)
-					p.connCreateDoneBus[cID] = bus
+					//p.connCreateDoneBus[cID] = bus
+					p.connCreateDoneBus.Store(cID, bus)
 					<-bus
 					appConn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
 					log.Printf("Client#handleAppConnRequest : create conn success , cliID is : %v , cID is : %v , sID is : %v !", p.cliID, cID, sID)
@@ -619,7 +609,9 @@ func (p *Client) proxyConnCloseHandler(message zpp.Message) {
 func (p *Client) proxyConnCreateDoneHandler(m zpp.Message) {
 	cID := m.CID()
 	sID := m.SerialId()
-	bus := p.connCreateDoneBus[cID]
+	r, _ := p.connCreateDoneBus.Load(cID)
+	bus, _ := r.(chan bool)
+	//bus := p.connCreateDoneBus[cID]
 	if bus == nil {
 		log.Printf("Client#proxyConnCreateDoneHandler : not bus to find , appConnis nil , cliID is : %v , cID is : %v , sID is : %v !", p.cliID, cID, sID)
 		return

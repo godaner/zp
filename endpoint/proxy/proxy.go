@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/godaner/zp/endpoint"
 	zpnet "github.com/godaner/zp/net"
 	"github.com/godaner/zp/zpp"
 	"github.com/godaner/zp/zpp/zppnew"
@@ -35,119 +36,108 @@ type Proxy struct {
 	seq            int32
 	destroySignal  chan bool
 	stopSignal     chan bool
-	stopSignal1     chan bool
-	startSignal1    chan bool
+	startSignal    chan bool
 	isStart        bool
+	S         endpoint.Status
 	sync.Once
-}
-
-func (p *Proxy) IsStart() bool {
-	p.init()
-	return p.isStart
+	startOnce sync.Once
+	stopOnce  sync.Once
 }
 
 func (p *Proxy) Destroy() error {
+	p.init()
 	close(p.destroySignal)
+	p.S = endpoint.Status_Destroied
 	return nil
 }
 
-func (p *Proxy) GetID() uint16 {
+func (p *Proxy) GetID() (id uint16) {
+	p.init()
 	return 0
+}
+
+func (p *Proxy) Status() endpoint.Status {
+	p.init()
+	return p.S
 }
 
 func (p *Proxy) Restart() error {
 	p.init()
-	if p.IsStart() {
-		err := p.Stop()
-		if err != nil {
-			return err
-		}
-	}
-	err := p.Start()
-	if err != nil {
-		return err
-	}
+	p.stop()
+	log.Printf("Proxy#Restart : pls wait %vs , the client is restarting !", restart_interval)
+	<-time.After(time.Duration(restart_interval) * time.Second)
+	p.start()
 	return nil
 }
 
 func (p *Proxy) Start() (err error) {
 	p.init()
-	if p.IsStart() {
-		return
-	}
-	if p.startSignal1 == nil {
-		return nil
-	}
-	select {
-	case <-p.startSignal1:
-		// already start , never happen
-	default:
+	p.start()
+	return nil
+}
+func (p *Proxy) start() (err error) {
+	p.startOnce.Do(func() {
+		if p.S == endpoint.Status_Started {
+			return
+		}
+		if p.startSignal == nil {
+			return
+		}
 		// omit start signal
-		p.isStart = true
-		p.startSignal1<-true
-		p.stopSignal=make(chan bool)
-	}
+		p.S = endpoint.Status_Started
+		p.startSignal <- true
+
+		p.stopOnce = sync.Once{}
+	})
 	return nil
 }
 func (p *Proxy) Stop() (err error) {
 	p.init()
-	if !p.IsStart() {
-		return
-	}
-	if p.stopSignal == nil {
-		return nil
-	}
-	select {
-	case <-p.stopSignal1:
-		// already stop , never happen
-	default:
-		// omit close signal
-		p.isStart = false
-		p.stopSignal1<-true
-		close(p.stopSignal)
-	}
+	p.stop()
 	return nil
 }
+func (p *Proxy) stop() (err error) {
+	p.stopOnce.Do(func() {
+		if p.S == endpoint.Status_Stoped {
+			return
+		}
+		if p.stopSignal == nil {
+			return
+		}
+		// omit close signal
+		close(p.stopSignal)
+		p.stopSignal = make(chan bool)
+		p.S = endpoint.Status_Stoped
+
+		p.startOnce = sync.Once{}
+	})
+	return nil
+}
+
 // init
 func (p *Proxy) init() {
 	p.Do(func() {
 		//// init var ////
 		p.destroySignal = make(chan bool)
-		p.stopSignal1 = make(chan bool)
 		p.stopSignal = make(chan bool)
-		p.startSignal1 = make(chan bool)
+		p.startSignal = make(chan bool)
+		p.startOnce = sync.Once{}
+		p.stopOnce = sync.Once{}
+		p.stopOnce.Do(func() {})
+		p.S = endpoint.Status_Stoped
 
 		//// log ////
 		p.browserConnRID = sync.Map{} // map[uint16]net.Conn{}
+
 		go func() {
 			for {
 				select {
 				case <-p.destroySignal:
 					log.Printf("Proxy#init : get destroy the proxy signal , we will destroy the proxy !")
 					return
-				case <-p.stopSignal1:
-					log.Printf("Proxy#init : get stop the proxy signal , we will stop the proxy !")
-					continue
-				}
-			}
-		}()
-		go func() {
-			for {
-				select {
-				case <-p.destroySignal:
-					log.Printf("Proxy#init : get destroy the proxy signal , we will destroy the proxy !")
-					return
-				case <-p.startSignal1: // wanna start
-					log.Printf("Proxy#init : get start the proxy signal , we will start the proxy in %vs !", restart_interval)
-					ticker := time.NewTimer(restart_interval * time.Second)
-					select {
-					case <-p.stopSignal1:
-						log.Printf("Proxy#init : when we wanna start proxy , but get stop signal , so stop the proxy !")
-						continue
-					case <-ticker.C:
-						go p.startListen()
-						continue
-					}
+				case <-p.startSignal: // wanna start
+					log.Print("Proxy#init : get start the proxy signal , we will start the proxy !")
+					go p.startListen()
 				}
 			}
 		}()
@@ -168,7 +158,7 @@ func (p *Proxy) startListen() {
 		lis, err := net.Listen("tcp", addr)
 		if err != nil {
 			p.Restart()
-			log.Printf("Proxy#startListen : listen local port err , err is : %v !",err.Error())
+			log.Printf("Proxy#startListen : listen local port err , err is : %v !", err.Error())
 			return
 		}
 		cl := zpnet.NewIPListener(lis)
