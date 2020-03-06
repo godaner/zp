@@ -17,7 +17,10 @@ func (p *Progress) Launch() (err error) {
 	var pry endpoint.Endpoint
 	c.SetUpdateEventHandler(func(c *Config) {
 		if pry != nil {
-			pry.Destroy()
+			err := pry.Destroy()
+			if err != nil {
+				log.Printf("Progress#Launch : destroy proxy err , err is : %v !", err.Error())
+			}
 		}
 		pry = &proxy.Proxy{
 			LocalPort:  c.LocalPort,
@@ -27,7 +30,7 @@ func (p *Progress) Launch() (err error) {
 		go func() {
 			err := pry.Start()
 			if err != nil {
-				log.Printf("Progress#Launch : start client err , err is : %v !", err.Error())
+				log.Printf("Progress#Launch : start proxy err , err is : %v !", err.Error())
 			}
 		}()
 	})

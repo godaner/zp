@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/godaner/zp/endpoint"
 	zpnet "github.com/godaner/zp/net"
 	"github.com/godaner/zp/zpp"
 	"github.com/godaner/zp/zpp/zppnew"
+	"github.com/looplab/fsm"
 	"io"
 	"log"
 	"math"
@@ -39,20 +41,15 @@ type Client struct {
 	seq               int32
 	cliID             uint16
 	proxyHelloSignal  chan bool
-	destroySignal     chan bool
 	stopSignal        chan bool
-	startSignal       chan bool
-	S            endpoint.Status
+	destroySignal     chan bool
 	sync.Once
-	startOnce sync.Once
-	stopOnce  sync.Once
+	fsm *fsm.FSM
 }
 
 func (p *Client) Destroy() error {
 	p.init()
-	close(p.destroySignal)
-	p.S = endpoint.Status_Destroied
-	return nil
+	return p.fsm.Event(string(endpoint.Event_Destroy))
 }
 
 func (p *Client) GetID() (id uint16) {
@@ -62,96 +59,69 @@ func (p *Client) GetID() (id uint16) {
 
 func (p *Client) Status() endpoint.Status {
 	p.init()
-	return p.S
+	return endpoint.Status(p.fsm.Current())
 }
 
 func (p *Client) Restart() error {
 	p.init()
-	p.stop()
-	log.Printf("Client#Restart : pls wait %vs , the client is restarting , cliID is : %v !", restart_interval, p.cliID)
-	<-time.After(time.Duration(restart_interval) * time.Second)
-	p.start()
-	return nil
+	err := p.fsm.Event(string(endpoint.Event_Stop))
+	if err != nil {
+		return err
+	}
+	log.Printf("Client#Restart : we will restart the client in %vs , pls wait a moment !", restart_interval)
+	destroySignal := p.destroySignal
+	select {
+	case <-destroySignal:
+		return errors.New("when we wanna start progress , get a destroy signal")
+	case <-time.After(time.Duration(restart_interval) * time.Second):
+		return p.fsm.Event(string(endpoint.Event_Start))
+	}
 }
 
 func (p *Client) Start() (err error) {
 	p.init()
-	p.start()
-	return nil
+	return p.fsm.Event(string(endpoint.Event_Start))
 }
-func (p *Client) start() (err error) {
-	p.startOnce.Do(func() {
-		if p.S == endpoint.Status_Started {
-			return
-		}
-		if p.startSignal == nil {
-			return
-		}
-		// omit start signal
-		p.S = endpoint.Status_Started
-		p.startSignal <- true
 
-		p.stopOnce = sync.Once{}
-	})
-	return nil
-}
 func (p *Client) Stop() (err error) {
 	p.init()
-	p.stop()
-	return nil
-}
-func (p *Client) stop() (err error) {
-	p.stopOnce.Do(func() {
-		if p.S == endpoint.Status_Stoped {
-			return
-		}
-		if p.stopSignal == nil {
-			return
-		}
-		// omit close signal
-		close(p.stopSignal)
-		p.stopSignal = make(chan bool)
-		p.S = endpoint.Status_Stoped
-
-		p.startOnce = sync.Once{}
-	})
-	return nil
+	return p.fsm.Event(string(endpoint.Event_Stop))
 }
 
 // init
 func (p *Client) init() {
 	p.Do(func() {
 		//// init var ////
-		p.destroySignal = make(chan bool)
-		p.stopSignal = make(chan bool)
-		p.startSignal = make(chan bool)
 		p.appConnMap = &sync.Map{}
-		p.startOnce = sync.Once{}
-		p.stopOnce = sync.Once{}
-		p.stopOnce.Do(func() {})
-		p.S = endpoint.Status_Stoped
 		p.connCreateDoneBus = &sync.Map{} //map[uint16]chan bool{}
+		p.destroySignal = make(chan bool)
 		// temp client id
 		p.cliID = p.TempCliID
-		// handler
-
-		go func() {
-			for {
-				select {
-				//case <-p.stopSignal: // wanna stop
-				//	log.Printf("Client#init : get stop the client signal , we will stop the client , cliID is : %v !", p.cliID)
-				//	continue
-				case <-p.destroySignal:
-					log.Printf("Client#init : get destroy the client signal , we will destroy the client , cliID is : %v !", p.cliID)
-					return
-				case <-p.startSignal: // wanna start
-					log.Printf("Client#init : get start the client signal , we will start the client , cliID is : %v !", p.cliID)
+		// fsm
+		p.fsm = fsm.NewFSM(
+			string(endpoint.Status_Stoped),
+			fsm.Events{
+				{Name: string(endpoint.Event_Start), Src: []string{string(endpoint.Status_Stoped)}, Dst: string(endpoint.Status_Started)},
+				{Name: string(endpoint.Event_Stop), Src: []string{string(endpoint.Status_Started)}, Dst: string(endpoint.Status_Stoped)},
+				{Name: string(endpoint.Event_Destroy), Src: []string{string(endpoint.Status_Started), string(endpoint.Status_Stoped)}, Dst: string(endpoint.Status_Destroied)},
+			},
+			fsm.Callbacks{
+				string(endpoint.Event_Start): func(event *fsm.Event) {
+					p.stopSignal = make(chan bool)
+					p.appConnMap = &sync.Map{}
+					p.connCreateDoneBus = &sync.Map{} //map[uint16]chan bool{}
 					go p.listenProxy()
-				}
-			}
-		}()
-		// wait the select
-		time.Sleep(500 * time.Millisecond)
+				},
+				string(endpoint.Event_Stop): func(event *fsm.Event) {
+					close(p.stopSignal)
+				},
+				string(endpoint.Event_Destroy): func(event *fsm.Event) {
+					close(p.stopSignal)
+					close(p.destroySignal)
+				},
+			},
+		)
+
 	})
 
 }
@@ -169,83 +139,71 @@ func (p *Client) closeAndNew(signal chan bool) (newSignal chan bool) {
 	return make(chan bool)
 }
 func (p *Client) listenProxy() {
-	//// print info ////
-	i, _ := json.Marshal(p)
-	log.Printf("Client#listenProxy : start listen proxy , print client info , cliID is : %v , info is : %v !", p.cliID, string(i))
-
-	//// init var ////
-	// reset restart signal
-	p.appConnMap = &sync.Map{}
-	p.connCreateDoneBus = &sync.Map{} //map[uint16]chan bool{}
-
-	//// dial proxy conn ////
-	addr := p.ProxyAddr
-	c, err := net.Dial("tcp", addr)
-	if err != nil {
-		log.Printf("Client#listenProxy : dial proxy addr err , cliID is : %v , err is : %v !", p.cliID, err)
-		p.Restart()
-		return
-	}
-	p.proxyConn = zpnet.NewIPConn(c)
-	p.proxyConn.AddCloseTrigger(func(conn net.Conn) {
-		log.Printf("Client#listenProxy : proxy conn is close by self , cliID is : %v  !", p.cliID)
-		p.Restart()
-	}, &zpnet.ConnCloseTrigger{
-		Signal: p.stopSignal,
-		Handler: func(conn net.Conn) {
-			log.Printf("Client#listenProxy : proxy conn is close by stopSignal , cliID is : %v  !", p.cliID)
-			p.proxyConn.Close()
-		},
-	}, &zpnet.ConnCloseTrigger{
-		Signal: p.destroySignal,
-		Handler: func(conn net.Conn) {
-			log.Printf("Client#listenProxy : proxy conn is close by destroySignal , cliID is : %v  !", p.cliID)
-			p.proxyConn.Close()
-		},
-	})
-
-	log.Printf("Client#listenProxy : dial proxy success , cliID is : %v , proxy addr is : %v !", p.cliID, addr)
-
-	//// receive proxy msg ////
 	go func() {
-		p.receiveProxyMsg()
-	}()
-
-	//// say hello to proxy ////
-	// wait some time , then check the proxy hello response
-	go func() {
-		p.proxyHelloSignal = p.closeAndNew(p.proxyHelloSignal)
-		// check
-		select {
-		case <-time.After(wait_server_hello_time_sec * time.Second):
-			log.Printf("Client#listenProxy : can't receive proxy hello in %vs , some reasons as follow : 1. maybe client's zpp version is diff from proxy , 2. maybe client's zppv2 secret is diff from proxy , 3. maybe the data sent to proxy is not right , cliID is : %v !", wait_server_hello_time_sec, p.cliID)
+		//// print info ////
+		i, _ := json.Marshal(p)
+		log.Printf("Client#listenProxy : start listen proxy , print client info , cliID is : %v , info is : %v !", p.cliID, string(i))
+		//// dial proxy conn ////
+		addr := p.ProxyAddr
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			log.Printf("Client#listenProxy : dial proxy addr err , cliID is : %v , err is : %v !", p.cliID, err)
 			p.Restart()
 			return
-		case <-p.stopSignal:
-			return
-		case <-p.proxyConn.CloseSignal():
-			return
-		case <-p.proxyHelloSignal:
-			return
-		case <-p.destroySignal:
+		}
+		p.proxyConn = zpnet.NewIPConn(c)
+		p.proxyConn.AddCloseTrigger(func(conn net.Conn) {
+			log.Printf("Client#listenProxy : proxy conn is close by self , cliID is : %v  !", p.cliID)
+			p.Restart()
+		}, &zpnet.ConnCloseTrigger{
+			Signal: p.stopSignal,
+			Handler: func(conn net.Conn) {
+				log.Printf("Client#listenProxy : proxy conn is close by stopSignal , cliID is : %v  !", p.cliID)
+				conn.Close()
+			},
+		})
+
+		log.Printf("Client#listenProxy : dial proxy success , cliID is : %v , proxy addr is : %v !", p.cliID, addr)
+
+		//// receive proxy msg ////
+		go func() {
+			p.receiveProxyMsg()
+		}()
+
+		//// say hello to proxy ////
+		// wait some time , then check the proxy hello response
+		go func() {
+			p.proxyHelloSignal = p.closeAndNew(p.proxyHelloSignal)
+			// check
+			select {
+			case <-time.After(wait_server_hello_time_sec * time.Second):
+				log.Printf("Client#listenProxy : can't receive proxy hello in %vs , some reasons as follow : 1. maybe client's zpp version is diff from proxy , 2. maybe client's zppv2 secret is diff from proxy , 3. maybe the data sent to proxy is not right , cliID is : %v !", wait_server_hello_time_sec, p.cliID)
+				p.Restart()
+				return
+			case <-p.stopSignal:
+				return
+			case <-p.proxyConn.CloseSignal():
+				return
+			case <-p.proxyHelloSignal:
+				return
+			}
+		}()
+		// send hello zpp
+		cID := uint16(0)
+		sID := p.newSerialNo()
+		m := zppnew.NewMessage(p.IPPVersion, zppnew.SetV2Secret(p.V2Secret))
+		m.ForClientHelloReq(sID)
+		b := m.Marshall()
+		zppLen := make([]byte, 4, 4)
+		binary.BigEndian.PutUint32(zppLen, uint32(len(b)))
+		b = append(zppLen, b...)
+		_, err = p.proxyConn.Write(b)
+		if err != nil {
+			log.Printf("Client#listenProxy : say hello to proxy err , cliID is : %v , cID is : %v , sID is : %v , err : %v !", p.cliID, cID, sID, err)
 			return
 		}
+		log.Printf("Client#listenProxy : say hello to proxy success , cliID is : %v , cID is : %v , sID is : %v , proxy addr is : %v !", p.cliID, cID, sID, addr)
 	}()
-	// send hello zpp
-	cID := uint16(0)
-	sID := p.newSerialNo()
-	m := zppnew.NewMessage(p.IPPVersion, zppnew.SetV2Secret(p.V2Secret))
-	m.ForClientHelloReq(sID)
-	b := m.Marshall()
-	zppLen := make([]byte, 4, 4)
-	binary.BigEndian.PutUint32(zppLen, uint32(len(b)))
-	b = append(zppLen, b...)
-	_, err = p.proxyConn.Write(b)
-	if err != nil {
-		log.Printf("Client#listenProxy : say hello to proxy err , cliID is : %v , cID is : %v , sID is : %v , err : %v !", p.cliID, cID, sID, err)
-		return
-	}
-	log.Printf("Client#listenProxy : say hello to proxy success , cliID is : %v , cID is : %v , sID is : %v , proxy addr is : %v !", p.cliID, cID, sID, addr)
 
 }
 
@@ -426,12 +384,6 @@ func (p *Client) listenApp() {
 			log.Printf("Client#listenApp : app listener is close by stopSignal , cliID is : %v !", p.cliID)
 			p.Restart()
 		},
-	}, &zpnet.ListenerCloseTrigger{
-		Signal: p.destroySignal,
-		Handler: func(l net.Listener) {
-			log.Printf("Client#listenApp : app listener is close by destroySignal , cliID is : %v !", p.cliID)
-			p.Restart()
-		},
 	})
 	for {
 		select {
@@ -466,12 +418,6 @@ func (p *Client) listenApp() {
 				Signal: p.stopSignal,
 				Handler: func(conn net.Conn) {
 					log.Printf("Client#listenApp : app conn is close by stopSignal , cliID is : %v  !", p.cliID)
-					appConn.Close()
-				},
-			}, &zpnet.ConnCloseTrigger{
-				Signal: p.destroySignal,
-				Handler: func(conn net.Conn) {
-					log.Printf("Client#listenApp : app conn is close by destroySignal , cliID is : %v  !", p.cliID)
 					appConn.Close()
 				},
 			})

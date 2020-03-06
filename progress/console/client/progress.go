@@ -20,10 +20,12 @@ func (p *Progress) Launch() (err error) {
 	c.SetUpdateEventHandler(func(c *Config) {
 		// stop first
 		if cli != nil {
-			cli.Destroy()
-			cli = nil
+			err := cli.Destroy()
+			if err != nil {
+				log.Printf("Progress#Launch : destroy client err , err is : %v !", err.Error())
+			}
 		}
-		cli := &client.Client{
+		cli = &client.Client{
 			ProxyAddr:      c.ProxyAddr,
 			IPPVersion:     c.IPPVersion,
 			LocalProxyPort: c.LocalProxyPort,
